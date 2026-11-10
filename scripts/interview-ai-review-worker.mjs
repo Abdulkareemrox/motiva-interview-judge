@@ -73,6 +73,7 @@ async function inferQuestion(name, question, evidence) {
 async function withModel(run) {
   if (process.platform !== "linux") throw new Error("The free technical-review worker requires Linux.");
   const directory = await mkdtemp(join(tmpdir(), "motiva-ai-review-"));
+  await chmod(directory, 0o755);
   const name = `interview-ai-${randomUUID()}`;
   try {
     await prepareModel(directory);
@@ -83,7 +84,11 @@ async function withModel(run) {
       try { await command("docker", ["exec", name, "curl", "--fail", "--silent", "--max-time", "2", "http://127.0.0.1:8080/health"], { timeout: 4000 }); healthy = true; break; }
       catch { await new Promise((done) => setTimeout(done, 1000)); }
     }
-    if (!healthy) throw new Error("The private model did not become ready.");
+    if (!healthy) {
+      const startup = await command("docker", ["logs", "--tail", "12", name]).catch(() => "Model startup logs unavailable.");
+      console.error(`Public model startup diagnostic: ${startup.slice(0, 1200)}`);
+      throw new Error("The private model did not become ready.");
+    }
     return await run(name);
   } finally { await command("docker", ["rm", "--force", name]).catch(() => {}); await rm(directory, { recursive: true, force: true }); }
 }
