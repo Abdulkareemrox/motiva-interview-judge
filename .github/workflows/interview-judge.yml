@@ -1,0 +1,40 @@
+name: Isolated Interview Judge
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Encrypted job pointer; never plaintext candidate code
+        required: false
+        type: string
+      self_test:
+        description: Run generic sandbox self-tests without candidate data
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  judge:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify isolation and supported languages
+        if: inputs.self_test
+        run: node scripts/interview-judge-worker.mjs --self-test
+      - name: Execute encrypted interview job
+        if: ${{ !inputs.self_test }}
+        env:
+          INTERVIEW_GITHUB_JUDGE_KEY: ${{ secrets.INTERVIEW_GITHUB_JUDGE_KEY }}
+          INTERVIEW_APP_ORIGIN: ${{ vars.INTERVIEW_APP_ORIGIN }}
+          INTERVIEW_GITHUB_JOB: ${{ inputs.job }}
+        run: node scripts/interview-judge-worker.mjs
