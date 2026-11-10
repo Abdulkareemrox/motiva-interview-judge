@@ -1,0 +1,40 @@
+name: Private Technical AI Review
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Encrypted review pointer only
+        required: false
+        type: string
+      self_test:
+        description: Test the local model on a generic technical fixture
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify the private local model
+        if: inputs.self_test
+        run: node scripts/interview-ai-review-worker.mjs --self-test
+      - name: Generate the technical advisory review
+        if: ${{ !inputs.self_test }}
+        env:
+          INTERVIEW_GITHUB_JUDGE_KEY: ${{ secrets.INTERVIEW_GITHUB_JUDGE_KEY }}
+          INTERVIEW_APP_ORIGIN: ${{ vars.INTERVIEW_APP_ORIGIN }}
+          INTERVIEW_GITHUB_JOB: ${{ inputs.job }}
+        run: node scripts/interview-ai-review-worker.mjs

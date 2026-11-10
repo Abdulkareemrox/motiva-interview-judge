@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
-export type JudgeMessagePurpose = "job" | "claim" | "payload" | "result";
+export type JudgeMessagePurpose = "job" | "claim" | "payload" | "result" | "review-job" | "review-claim" | "review-payload" | "review-result";
 const MAX_BYTES = 1000000;
 
 function messageKey(key: string): Buffer {
@@ -9,7 +9,7 @@ function messageKey(key: string): Buffer {
 }
 
 function context(purpose: JudgeMessagePurpose): Buffer {
-  if (!["job", "claim", "payload", "result"].includes(purpose)) throw new Error("Unknown interview worker message purpose.");
+  if (!["job", "claim", "payload", "result", "review-job", "review-claim", "review-payload", "review-result"].includes(purpose)) throw new Error("Unknown interview worker message purpose.");
   return Buffer.from(`motiva-interview-judge:v1:${purpose}`);
 }
 
