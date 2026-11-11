@@ -11,6 +11,7 @@ const RUNTIMES = {
   python: { image: "python:3.13-slim-bookworm", filename: "program.py", command: ["python3", "-B", "/source/program.py"] },
   cpp: { image: "gcc:14-bookworm", filename: "main.cpp", compile: ["g++", "-std=c++20", "-O2", "/source/main.cpp", "-o", "/compiled/program"], command: ["/compiled/program"] },
   java: { image: "eclipse-temurin:21-jdk-jammy", filename: "Main.java", compile: ["javac", "-proc:none", "-d", "/compiled", "/source/Main.java"], command: ["java", "-Xmx32m", "-Xss256k", "-XX:ActiveProcessorCount=1", "-XX:MaxMetaspaceSize=48m", "-XX:ReservedCodeCacheSize=16m", "-cp", "/compiled", "Main"] },
+  react: { image: "node:22-bookworm-slim", filename: "App.jsx", compile: ["/opt/interview-react/node_modules/.bin/esbuild", "/source/App.jsx", "--bundle", "--platform=node", "--format=cjs", "--jsx=automatic", "--external:react", "--external:react-dom", "--outfile=/compiled/App.cjs"], command: ["node", "/opt/interview-react/runner.cjs"] },
 };
 const builtImages = new Map();
 
@@ -31,7 +32,7 @@ export function sandboxArguments(name, memoryMb, cpuSeconds, source, compiled, m
     "run", "--interactive", "--name", name, "--network", "none", "--read-only", "--cpus", "1", "--memory", `${memory}m`, "--memory-swap", `${memory}m`,
     "--pids-limit", compile ? "128" : "64", "--cap-drop", "ALL", "--cap-add", "SETUID", "--cap-add", "SETGID", "--security-opt", "no-new-privileges",
     "--ulimit", `cpu=${cpu}:${cpu + 1}`, "--ulimit", "core=0:0", "--ulimit", "nofile=256:256", "--ulimit", compile ? "fsize=16777216:16777216" : "fsize=65536:65536",
-    "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777", "--env", "HOME=/tmp", "--env", "TMPDIR=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1",
+    "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777", "--env", "HOME=/tmp", "--env", "TMPDIR=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1", "--env", "NODE_PATH=/opt/interview-react/node_modules",
     "--mount", `type=bind,source=${source},target=/source,readonly`,
     "--mount", `type=bind,source=${compiled},target=/compiled${compile ? "" : ",readonly"}`,
     "--mount", `type=bind,source=${metrics},target=/metrics`,
@@ -42,7 +43,9 @@ async function buildRuntime(language, directory) {
   if (builtImages.has(language)) return builtImages.get(language);
   const image = `motiva-interview-${language}`;
   const file = join(directory, "Dockerfile");
-  await writeFile(file, `FROM ${RUNTIMES[language].image}\nUSER root\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends time util-linux coreutils && rm -rf /var/lib/apt/lists/*\nENTRYPOINT []\nCMD ["/bin/true"]\n`);
+  if (language === "react") await writeFile(join(directory, "runner.cjs"), `const React = require("react");\nconst { renderToStaticMarkup } = require("react-dom/server");\nasync function main() {\n  let input = "";\n  for await (const chunk of process.stdin) input += chunk;\n  const props = input.trim() ? JSON.parse(input) : {};\n  if (!props || typeof props !== "object" || Array.isArray(props)) throw new Error("React test input must be a JSON object of component props.");\n  const appModule = require("/compiled/App.cjs");\n  const Component = appModule.default || appModule.App;\n  if (typeof Component !== "function") throw new Error("Export a React component as the default export or as App.");\n  process.stdout.write(renderToStaticMarkup(React.createElement(Component, props)));\n}\nmain().catch((error) => { console.error(error.message); process.exitCode = 1; });\n`);
+  const reactSetup = language === "react" ? "RUN npm install --prefix /opt/interview-react --no-save --ignore-scripts --no-audit --no-fund react@19.2.3 react-dom@19.2.3 esbuild@0.28.2\nCOPY runner.cjs /opt/interview-react/runner.cjs\n" : "";
+  await writeFile(file, `FROM ${RUNTIMES[language].image}\nUSER root\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends time util-linux coreutils && rm -rf /var/lib/apt/lists/*\n${reactSetup}ENTRYPOINT []\nCMD ["/bin/true"]\n`);
   const built = await command("docker", ["build", "--pull", "--quiet", "-t", image, "-f", file, directory], { timeout: 240000, maxBuffer: 2000000 });
   if (!built.ok) throw new Error("The isolated language image could not be prepared.");
   builtImages.set(language, image);
@@ -171,12 +174,16 @@ async function selfTest() {
     { language: "python", code: 'import sys\nprint(sum(map(int, sys.stdin.read().split())))\n', input: "2 3\n", expected: "5", status: "executed" },
     { language: "cpp", code: '#include <iostream>\nint main(){long first,second;std::cin>>first>>second;std::cout<<first+second;}', input: "2 3\n", expected: "5", status: "executed" },
     { language: "java", code: 'import java.util.*;public class Main{public static void main(String[] args){Scanner input=new Scanner(System.in);System.out.println(input.nextInt()+input.nextInt());}}', input: "2 3\n", expected: "5", status: "executed" },
+    { language: "react", code: 'export default function App({ name = "World" }) { return <main>Hello, {name}</main>; }', tests: [{ input: '{"name":"Ada"}', expected: "<main>Hello, Ada</main>" }, { input: '{"name":"<Ada>"}', expected: "<main>Hello, &lt;Ada&gt;</main>" }] },
   ];
   for (const fixture of fixtures) {
-    const [result] = await executePayload({ language: fixture.language, code: fixture.code, cpuSeconds: 1, memoryMb: 128, tests: [{ id: randomUUID(), input: fixture.input }] });
-    assert.equal(result.status, fixture.status, `${fixture.language} sandbox self-test failed.`);
-    if (fixture.status === "executed") { assert.equal(result.stdout.trim(), fixture.expected); assert.ok(result.seconds !== null && result.memoryKb > 0); }
-    console.log(`Self-test passed: ${fixture.language} / ${fixture.status}.`);
+    const tests = fixture.tests || [{ input: fixture.input, expected: fixture.expected }];
+    const results = await executePayload({ language: fixture.language, code: fixture.code, cpuSeconds: 1, memoryMb: 128, tests: tests.map((test) => ({ id: randomUUID(), input: test.input })) });
+    for (const [index, result] of results.entries()) {
+      assert.equal(result.status, fixture.status || "executed", `${fixture.language} sandbox self-test failed.`);
+      if ((fixture.status || "executed") === "executed") { assert.equal(result.stdout.trim(), tests[index].expected); assert.ok(result.seconds !== null && result.memoryKb > 0); }
+    }
+    console.log(`Self-test passed: ${fixture.language} / ${fixture.status || "executed"}.`);
   }
 }
 
